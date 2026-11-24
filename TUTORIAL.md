@@ -11,7 +11,8 @@
    - **Windows**：双击 `启动背屏桌宠_Windows.bat`（若手机连不上，右键以管理员身份运行一次 `Windows放行防火墙8765端口.bat`）
 2. 浏览器会自动打开本地控制台。在 **卡片 1** 中，系统会自动检测你本机已安装的 AI 软件（Codex / DeepSeek Harness / Antigravity / Claude / 实验版 WorkBuddy & Cursor），点击 **「一键接入」**。
    - 所有配置改动前均会自动备份到 `~/.local/state/mi-rear-pet/backups/`，随时可点「卸载」无损还原。
-3. **重启一次你刚才接入的 AI 软件**，让新钩子生效。
+3. **完全退出并重启一次你刚才接入的 AI 软件**，让新钩子生效。
+   - **Codex 用户注意**：新版 Codex 有 Hook 信任安全校验。完全重启 Codex 后，请进入 **Codex 设置 → Hooks**（或在命令行 Codex 输入 `/hooks`），将所有 **`Mi Rear AI Pet status`** 钩子点一遍信任，背屏才会收到 Codex 状态（控制台卡片 1 也会自动检测是否还有未信任钩子）。
 
 ---
 

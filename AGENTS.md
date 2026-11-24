@@ -39,7 +39,9 @@
    python3 -c 'import hook_manager; print(hook_manager.install_agent("<agent_id>"))'
    ```
    - 如需卸载还原：`python3 -c 'import hook_manager; print(hook_manager.remove_agent("<agent_id>"))'`
-3. **重要提醒**：接入完成后，明确告诉用户**「请稍后重启一次刚才接入的 AI 软件（如 Codex / DeepSeek Harness / Claude / Antigravity），新钩子才会生效」**。
+3. **重要提醒**：
+   - 接入完成后，明确告诉用户**「请稍后重启一次刚才接入的 AI 软件（如 Codex / DeepSeek Harness / Claude / Antigravity），新钩子才会生效」**。
+   - **Codex 特别注意**：新版 Codex 有 Hook 信任校验机制，通过外部脚本写入 `~/.codex/hooks.json` 后默认处于 `untrusted / modified` 状态会被静默跳过。若 `get_agents_status()` 中 `codex.needs_trust` 为 `true`，请明确引导用户**先完全退出并重启 Codex**，再进入 **Codex 设置 → Hooks**（或在终端 Codex 输入 `/hooks`），逐条信任所有 `Mi Rear AI Pet status` 条目后即可生效。
 
 ---
 

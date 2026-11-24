@@ -8,13 +8,16 @@ Always backs up the original config file before the first modification.
 
 import json
 import os
+import queue
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 ROOT_DIR = Path(__file__).resolve().parent
 HOOK_CLIENT = ROOT_DIR / "hook_client.py"
@@ -179,6 +182,208 @@ def _codex_path() -> Path:
     return root / "hooks.json"
 
 
+_CODEX_TRUST_CACHE: Dict[str, Any] = {"sig": None, "result": None}
+
+
+def _find_codex_binary() -> Optional[str]:
+    which_bin = shutil.which("codex")
+    if which_bin:
+        return which_bin
+    candidates: List[str] = []
+    if os.name == "nt":
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        prog_files = os.environ.get("ProgramFiles", "")
+        for base in (local_app, prog_files):
+            if not base:
+                continue
+            candidates.extend(
+                [
+                    os.path.join(base, "Programs", "Codex", "resources", "codex.exe"),
+                    os.path.join(base, "Programs", "ChatGPT", "resources", "codex-cli", "codex.exe"),
+                    os.path.join(base, "OpenAI", "Codex", "codex.exe"),
+                ]
+            )
+    else:
+        candidates.extend(
+            [
+                "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+                "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+                "/Applications/Codex.app/Contents/Resources/codex",
+            ]
+        )
+    for cand in candidates:
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
+def _camel_to_snake(name: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def _codex_trust_fallback_from_config(hooks_path: Path) -> Dict[str, Any]:
+    """Read-only fallback when codex CLI is unavailable: check [hooks.state] keys in config.toml."""
+    config_path = hooks_path.parent / "config.toml"
+    try:
+        cfg = _read_json_obj(hooks_path)
+        hooks = cfg.get("hooks", {})
+        if not isinstance(hooks, dict):
+            return {"checked": False, "trusted": 0, "untrusted": 0, "total": 0}
+        our_keys: List[str] = []
+        for event_name, groups in hooks.items():
+            if not isinstance(groups, list):
+                continue
+            snake = _camel_to_snake(str(event_name))
+            for g_idx, group in enumerate(groups):
+                sub = group.get("hooks", []) if isinstance(group, dict) else []
+                if not isinstance(sub, list):
+                    continue
+                for h_idx, h in enumerate(sub):
+                    if isinstance(h, dict) and (
+                        h.get("statusMessage") == HOOK_MARKER or _is_our_command(h.get("command"), "codex")
+                    ):
+                        our_keys.append(f"{hooks_path}:{snake}:{g_idx}:{h_idx}")
+        if not our_keys:
+            return {"checked": True, "trusted": 0, "untrusted": 0, "total": 0}
+        toml_text = config_path.read_text(encoding="utf-8", errors="ignore") if config_path.exists() else ""
+        # Only conclude missing keys are untrusted; present keys might still be modified without CLI check.
+        def _has_key(k: str) -> bool:
+            escaped = k.replace("\\", "\\\\")
+            return f'[hooks.state."{k}"]' in toml_text or f'[hooks.state."{escaped}"]' in toml_text
+
+        missing = sum(1 for k in our_keys if not _has_key(k))
+        return {
+            "checked": True,
+            "trusted": len(our_keys) - missing,
+            "untrusted": missing,
+            "total": len(our_keys),
+        }
+    except Exception:
+        return {"checked": False, "trusted": 0, "untrusted": 0, "total": 0}
+
+
+def _get_codex_trust_status() -> Dict[str, Any]:
+    """Query Codex's official read-only hooks/list RPC across macOS/Windows/Linux (cached by mtimes)."""
+    hooks_path = _codex_path()
+    config_path = hooks_path.parent / "config.toml"
+    try:
+        h_stat = hooks_path.stat() if hooks_path.exists() else None
+        c_stat = config_path.stat() if config_path.exists() else None
+        sig: Tuple[Any, ...] = (
+            str(hooks_path),
+            h_stat.st_mtime_ns if h_stat else 0,
+            h_stat.st_size if h_stat else 0,
+            c_stat.st_mtime_ns if c_stat else 0,
+            c_stat.st_size if c_stat else 0,
+        )
+    except OSError:
+        sig = (str(hooks_path), 0, 0, 0, 0)
+
+    if _CODEX_TRUST_CACHE.get("sig") == sig and _CODEX_TRUST_CACHE.get("result") is not None:
+        return dict(_CODEX_TRUST_CACHE["result"])
+
+    codex_bin = _find_codex_binary()
+    result: Optional[Dict[str, Any]] = None
+
+    if codex_bin:
+        proc = None
+        try:
+            popen_kwargs: Dict[str, Any] = {
+                "stdin": subprocess.PIPE,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.DEVNULL,
+                "text": True,
+                "encoding": "utf-8",
+                "errors": "replace",
+            }
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            proc = subprocess.Popen([codex_bin, "app-server"], **popen_kwargs)
+            assert proc.stdin is not None and proc.stdout is not None
+
+            lines_q: "queue.Queue[Optional[str]]" = queue.Queue()
+
+            def _reader() -> None:
+                try:
+                    assert proc is not None and proc.stdout is not None
+                    for raw_line in proc.stdout:
+                        lines_q.put(raw_line)
+                except Exception:
+                    pass
+                finally:
+                    lines_q.put(None)
+
+            threading.Thread(target=_reader, daemon=True).start()
+
+            proc.stdin.write(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {"clientInfo": {"name": "mi-rear-pet", "version": "2.1"}},
+                    }
+                )
+                + "\n"
+            )
+            proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "hooks/list", "params": {}}) + "\n")
+            proc.stdin.flush()
+
+            deadline = time.time() + 3.5
+            while time.time() < deadline:
+                remaining = max(0.05, deadline - time.time())
+                try:
+                    line = lines_q.get(timeout=min(0.3, remaining))
+                except queue.Empty:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                if line is None:
+                    break
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                if msg.get("id") == 2 and isinstance(msg.get("result"), dict):
+                    trusted = 0
+                    untrusted = 0
+                    for entry in msg["result"].get("data", []):
+                        for h in entry.get("hooks", []):
+                            if not isinstance(h, dict):
+                                continue
+                            if h.get("statusMessage") == HOOK_MARKER or _is_our_command(h.get("command"), "codex"):
+                                if h.get("trustStatus") == "trusted":
+                                    trusted += 1
+                                else:
+                                    untrusted += 1
+                    result = {
+                        "checked": True,
+                        "trusted": trusted,
+                        "untrusted": untrusted,
+                        "total": trusted + untrusted,
+                    }
+                    break
+        except Exception:
+            result = None
+        finally:
+            if proc is not None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=0.5)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+
+    if result is None:
+        result = _codex_trust_fallback_from_config(hooks_path)
+
+    _CODEX_TRUST_CACHE["sig"] = sig
+    _CODEX_TRUST_CACHE["result"] = dict(result)
+    return result
+
+
 def _is_codex_installed() -> bool:
     try:
         cfg = _read_json_obj(_codex_path())
@@ -250,7 +455,15 @@ def _configure_codex(remove: bool = False) -> Dict[str, Any]:
             hooks.pop(event, None)
 
     _atomic_write_json(path, cfg)
-    return {"ok": True, "installed": not remove, "path": str(path)}
+    _CODEX_TRUST_CACHE["sig"] = None
+    _CODEX_TRUST_CACHE["result"] = None
+    res: Dict[str, Any] = {"ok": True, "installed": not remove, "path": str(path)}
+    if not remove:
+        res["next_step"] = (
+            "已写入 ~/.codex/hooks.json！请先完全退出并重启 Codex，再进入「Codex 设置 → Hooks」"
+            "（或在终端 Codex 输入 /hooks）信任所有「Mi Rear AI Pet status」钩子，状态才会开始同步。"
+        )
+    return res
 
 
 # ================= ANTIGRAVITY (~/.gemini/config/hooks.json) =================
@@ -730,6 +943,18 @@ def get_agents_status() -> List[Dict[str, Any]]:
             installed = bool(spec["is_installed"]())
         except Exception:
             installed = False
+        needs_trust = False
+        warning = ""
+        if agent_id == "codex" and installed:
+            trust_info = _get_codex_trust_status()
+            untrusted = int(trust_info.get("untrusted", 0))
+            if untrusted > 0:
+                needs_trust = True
+                warning = (
+                    f"Codex 尚未信任 {untrusted} 条桌宠钩子（安全机制默认拦截外部新增 Hook）。"
+                    "请先完全退出并重启 Codex，再进入「Codex 设置 → Hooks」（或在终端 Codex 输入 /hooks）"
+                    "信任所有「Mi Rear AI Pet status」条目即可生效。"
+                )
         out.append(
             {
                 "id": agent_id,
@@ -738,6 +963,8 @@ def get_agents_status() -> List[Dict[str, Any]]:
                 "experimental": bool(spec.get("experimental", False)),
                 "detected": detected,
                 "installed": installed,
+                "needs_trust": needs_trust,
+                "warning": warning,
                 "auto": spec["auto"],
                 "config_path": str(spec["path"]()),
                 "note": spec["note"],

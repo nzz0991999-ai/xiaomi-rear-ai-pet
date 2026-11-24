@@ -70,7 +70,11 @@ def map_event(provider: str, event: str, payload: dict):
     p = provider.lower()
 
     if p == "claude":
-        if event in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
+        if event == "PreToolUse":
+            if str(payload.get("tool_name") or "") == "AskUserQuestion":
+                return ("waiting_user", False)
+            return ("running", False)
+        if event in ("UserPromptSubmit", "PostToolUse"):
             return ("running", False)
         if event == "PermissionRequest":
             return ("waiting_user", False)
@@ -88,7 +92,22 @@ def map_event(provider: str, event: str, payload: dict):
         return None
 
     if p == "codex":
-        if event in ("UserPromptSubmit", "PreToolUse", "PostToolUse"):
+        if event == "UserPromptSubmit":
+            return ("running", False)
+        if event in ("PreToolUse", "PostToolUse"):
+            tool = str(payload.get("tool_name") or "").replace("__", ".").rsplit(".", 1)[-1]
+            if tool in ("request_user_input", "request_user_input_async"):
+                if event == "PreToolUse":
+                    return ("waiting_user", False)
+                if tool == "request_user_input_async":
+                    resp = payload.get("tool_response")
+                    if isinstance(resp, str):
+                        try:
+                            resp = json.loads(resp)
+                        except ValueError:
+                            resp = None
+                    rejected = isinstance(resp, dict) and (resp.get("accepted") is False or resp.get("isError") is True)
+                    return ("running" if rejected else "waiting_user", False)
             return ("running", False)
         if event == "PermissionRequest":
             return ("waiting_user", False)

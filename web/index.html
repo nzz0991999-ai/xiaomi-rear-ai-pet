@@ -429,6 +429,23 @@
       color: #ffd37a;
     }
 
+    .mini-tag.warn {
+      background: rgba(255, 112, 67, 0.18);
+      border: 1px solid rgba(255, 138, 101, 0.48);
+      color: #ffab91;
+    }
+
+    .agent-warn {
+      margin-top: 4px;
+      padding: 5px 8px;
+      border-radius: 6px;
+      background: rgba(255, 152, 0, 0.12);
+      border: 1px solid rgba(255, 183, 77, 0.34);
+      font-size: 10px;
+      line-height: 1.45;
+      color: #ffd08a;
+    }
+
     .agent-note {
       font-size: 10px;
       color: rgba(255, 255, 255, 0.48);
@@ -1056,7 +1073,7 @@
             <div class="faq-box">
               <h4>4. 接入 Agent 后背屏没反应 & 背屏手势</h4>
               <ul>
-                <li><b>没反应先重启软件</b>：在卡片 1 点完「一键接入」后，务必<b>完全退出并重开一次</b> Codex / DSH / Antigravity / Claude，新钩子才会加载。</li>
+                <li><b>没反应先重启软件 & 信任钩子</b>：在卡片 1 点完「一键接入」后，务必<b>完全退出并重开一次</b>对应 AI 软件；如果使用的是 <b>Codex</b>，重启后还需进入 <b>Codex 设置 → Hooks</b>（或在命令行 Codex 输入 <code>/hooks</code>）逐条<b>信任</b>「Mi Rear AI Pet status」钩子（Codex 安全机制默认拦截未信任的外部 Hook）。</li>
                 <li><b>背屏手势说明</b>：单击左/右眼眨眼，点眉心雷达审视，左右轻滑触发超频/无语彩蛋，<b>单指长按 2 秒</b>调出校准面板（支持一键重置默认）。</li>
                 <li><b>遇到问题反馈</b>：展开手机 App 最底部的「诊断日志」点「复制日志」即可发给作者排查。</li>
               </ul>
@@ -2891,6 +2908,8 @@
             row.className = "agent-row";
             const tag = a.detected ? '<span class="mini-tag found">已检测到</span>' : '<span class="mini-tag">未检测</span>';
             const expTag = a.experimental ? '<span class="mini-tag exp">实验版</span>' : '';
+            const warnTag = a.needs_trust ? '<span class="mini-tag warn">待信任</span>' : '';
+            const warnBox = a.warning ? `<div class="agent-warn">⚠️ ${a.warning}</div>` : '';
             let actionHtml = "";
             if (a.auto) {
               if (a.installed) {
@@ -2906,8 +2925,9 @@
             if (!a.detected && !a.installed) row.style.opacity = "0.72";
             row.innerHTML = `
               <div class="agent-meta">
-                <div class="agent-name">${a.name} ${expTag} ${tag}</div>
+                <div class="agent-name">${a.name} ${expTag} ${tag} ${warnTag}</div>
                 <div class="agent-note">${a.note}</div>
+                ${warnBox}
               </div>
               <div style="flex-shrink:0;">${actionHtml}</div>
             `;
@@ -2928,7 +2948,12 @@
                 });
                 const res = await resp.json();
                 if (res.ok) {
-                  showConsoleToast(act === "install" ? `已成功接入 ${agentId}（原配置已自动备份）` : `已安全卸载 ${agentId} 的背屏钩子`);
+                  showConsoleToast(
+                    res.next_step ||
+                      (act === "install"
+                        ? `已成功接入 ${agentId}（原配置已自动备份，重启软件后生效）`
+                        : `已安全卸载 ${agentId} 的背屏钩子`)
+                  );
                 } else {
                   showConsoleToast(`操作失败: ${res.error || "未知错误"}`, true);
                 }
