@@ -43,6 +43,7 @@ public class RearPetActivity extends Activity {
     private TextView statusOverlay;
     private String currentUrl = "http://127.0.0.1:8765/";
     private int webViewCreatedDisplayId = -1;
+    private boolean hasEverBeenOnRearDisplay = false;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable retryRunnable = () -> {
         if (webView != null && !isFinishing()) {
@@ -148,9 +149,26 @@ public class RearPetActivity extends Activity {
                 webView = null;
                 webViewCreatedDisplayId = -1;
             }
+            if (hasEverBeenOnRearDisplay) {
+                // HyperOS (e.g. when Camera takes over Display 1) or withdraw bounced this rear task
+                // back onto Display 0: finish immediately so it NEVER blocks Camera or any front app!
+                DiagLog.log("PetAct", "背屏实例被退回主屏(d=0)，自动退出以避免遮挡前景应用");
+                try {
+                    moveTaskToBack(true);
+                } catch (Throwable ignored) {}
+                try {
+                    finishAndRemoveTask();
+                } catch (Throwable ignored) {
+                    finish();
+                }
+                return;
+            }
             statusOverlay.setText("正在投射到背屏...");
             statusOverlay.setVisibility(View.VISIBLE);
             return;
+        }
+        if (!isFrontFullscreenMode() && dId != 0) {
+            hasEverBeenOnRearDisplay = true;
         }
         if (webView != null && webViewCreatedDisplayId == dId) {
             return;

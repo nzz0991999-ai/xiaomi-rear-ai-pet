@@ -410,6 +410,40 @@ public final class ShizukuBridge {
     }
 
     /**
+     * Silent background guard restore:
+     * Calls RearShellHelper's `guard_repin` mode which yields immediately to Camera / protected UIs,
+     * prefers in-place Display-1 refront without touching Display 0, and never pops MainActivity over user apps.
+     */
+    public static void guardRepinOnRearDisplay(Context ctx, String url, int displayId, LaunchCallback cb) {
+        final Context app = ctx.getApplicationContext();
+        EXEC.execute(() -> {
+            if (!isBinderAlive()) {
+                requestBinderFromManager(app);
+            }
+            if (!isBinderAlive() || !isPermissionGranted()) {
+                postCallback(cb, false, "Shizuku 未授权或未连接");
+                return;
+            }
+            String apkPath = app.getApplicationInfo().sourceDir;
+            String[] helperCmd = new String[]{
+                    "sh", "-c",
+                    "CLASSPATH=\"$1\" exec /system/bin/app_process /system/bin com.mirearpet.RearShellHelper guard_repin \"$2\" \"$3\" \"$4\"",
+                    "_",
+                    apkPath,
+                    app.getPackageName(),
+                    String.valueOf(displayId),
+                    url
+            };
+            ShellResult res = runShellSync(helperCmd);
+            String out = res.output == null ? "" : res.output.trim();
+            if (!out.contains("OK:already_on_rear")) {
+                DiagLog.log("Guard", "guard_repin exit=" + res.exitCode + " " + out);
+            }
+            postCallback(cb, res.ok && out.contains("OK:"), out);
+        });
+    }
+
+    /**
      * Collects read-only display & WindowManager diagnostics without launching or moving any activity.
      */
     public static void collectDiagnostics(Context ctx, LaunchCallback cb) {
