@@ -12,6 +12,7 @@ import queue
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -43,9 +44,70 @@ def _is_our_command(cmd: Any, provider: str) -> bool:
 
 def _atomic_write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    content = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
     tmp = path.with_suffix(path.suffix + ".mi_rear_pet.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    tmp.write_text(content, encoding="utf-8")
+
+    # 1. Try atomic replace (with brief retries on Windows for AV / file-watcher transient locks)
+    last_exc: Optional[OSError] = None
+    attempts = 4 if os.name == "nt" else 1
+    for attempt in range(attempts):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as exc:
+            last_exc = exc
+            if os.name != "nt":
+                break
+            # Clear Read-Only flag on target if set (Win32 MoveFileExW rejects Read-Only with WinError 5)
+            if attempt == 0 and path.exists():
+                try:
+                    os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+                except OSError:
+                    pass
+            time.sleep(0.08 * (attempt + 1))
+        except OSError as exc:
+            last_exc = exc
+            if os.name != "nt" or getattr(exc, "winerror", None) not in (5, 32):
+                break
+            time.sleep(0.08 * (attempt + 1))
+
+    # 2. Windows fallback: when target is held open without FILE_SHARE_DELETE or marked Hidden,
+    #    os.replace fails with WinError 5/32 even though in-place overwrite ("r+") succeeds.
+    if os.name == "nt":
+        try:
+            if path.exists():
+                try:
+                    os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+                except OSError:
+                    pass
+                with path.open("r+", encoding="utf-8") as fh:
+                    fh.seek(0)
+                    fh.write(content)
+                    fh.truncate()
+            else:
+                path.write_text(content, encoding="utf-8")
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            return
+        except OSError as exc:
+            last_exc = exc
+
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+
+    if os.name == "nt" and isinstance(last_exc, PermissionError):
+        raise PermissionError(
+            f"无法写入配置文件 {path}（[WinError 5] 拒绝访问）。"
+            "请先完全退出对应 AI 软件（如 WorkBuddy）后再点「一键接入」，"
+            "或检查该文件是否被设为只读 / 被杀毒软件拦截后重试。"
+        ) from last_exc
+    if last_exc is not None:
+        raise last_exc
 
 
 def _backup_once(path: Path, tag: str) -> None:
@@ -64,7 +126,7 @@ def _backup_once(path: Path, tag: str) -> None:
 def _read_json_obj(path: Path) -> Dict[str, Any]:
     if not path.exists():
         return {}
-    text = path.read_text(encoding="utf-8").strip()
+    text = path.read_text(encoding="utf-8-sig").strip()
     if not text:
         return {}
     obj = json.loads(text)
