@@ -13,6 +13,7 @@ Works out-of-the-box on macOS, Windows, and Linux with ZERO external dependencie
 """
 
 import argparse
+import errno
 import json
 import mimetypes
 import os
@@ -24,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -802,7 +804,7 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
     """Suppress noisy stack traces when mobile browsers sleep or reset keep-alive sockets."""
 
     daemon_threads = True
-    allow_reuse_address = True
+    allow_reuse_address = os.name != "nt"
 
     def handle_error(self, request, client_address) -> None:
         exc = sys.exc_info()[1]
@@ -811,23 +813,99 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+def _configure_stdio_utf8() -> None:
+    """Prevent UnicodeEncodeError on non-UTF-8 Windows consoles (e.g. English CP1252)."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+def _check_existing_server(port: int) -> Optional[Dict[str, Any]]:
+    """Return /api/status payload if Mi Rear Pet is already running on localhost:port."""
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://127.0.0.1:{port}/api/status", timeout=1.0) as resp:
+            if resp.status != 200:
+                return None
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            if isinstance(data, dict) and data.get("hub_online") is True and "providers" in data:
+                return data
+    except Exception:
+        pass
+    return None
+
+
+def _open_browser(url: str) -> None:
+    """Open desktop console URL in the default browser with Windows fallbacks."""
+    try:
+        import webbrowser
+
+        if webbrowser.open(url):
+            return
+    except Exception:
+        pass
+    if os.name == "nt":
+        try:
+            os.startfile(url)  # type: ignore[attr-defined]
+            return
+        except Exception:
+            pass
+        try:
+            subprocess.Popen(["cmd", "/c", "start", "", url], shell=False)
+        except Exception:
+            pass
+
+
 def main() -> None:
+    _configure_stdio_utf8()
+
     parser = argparse.ArgumentParser(description="Xiaomi Rear Screen AI Pet Standalone Server")
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8765, help="Bind port (default: 8765)")
     parser.add_argument("--open", action="store_true", help="Auto-open desktop preview & setup console in browser")
     args = parser.parse_args()
 
-    hub = UniversalStatusHub()
-    hub.start()
+    console_url = f"http://127.0.0.1:{args.port}/?preview=1"
 
+    existing = _check_existing_server(args.port)
+    if existing is not None:
+        lan_ip = get_lan_ip()
+        print("=" * 64)
+        print(f"  检测到「小米妙享背屏 AI 桌宠」服务已在端口 {args.port} 运行中！")
+        print(f"  电脑控制台/预览 : {console_url}")
+        print(f"  手机局域网直连  : http://{lan_ip}:{args.port}/")
+        print("=" * 64)
+        if args.open:
+            print("  正在为你重新打开浏览器控制台...")
+            _open_browser(console_url)
+            time.sleep(2.5)
+        return
+
+    hub = UniversalStatusHub()
+    try:
+        server = QuietThreadingHTTPServer((args.host, args.port), make_handler(hub, args.port))
+    except OSError as exc:
+        winerr = getattr(exc, "winerror", None)
+        print("=" * 64)
+        print(f"  [错误] 无法监听端口 {args.port}：{exc}")
+        if winerr == 10013:
+            print("  可能原因：Windows 的 Hyper-V / WSL / Docker 保留了该端口段，或被安全软件拦截。")
+            print("  解决建议：可尝试在命令行运行 python server.py --port 18765 --open，")
+            print("           或右键以管理员运行「Windows放行防火墙8765端口.bat」后重试。")
+        elif exc.errno == errno.EADDRINUSE or winerr == 10048:
+            print(f"  可能原因：端口 {args.port} 已被本机其他程序占用。")
+            print(f"  解决建议：关闭占用 {args.port} 端口的程序，或改用其他端口启动。")
+        print("=" * 64)
+        sys.exit(1)
+
+    hub.start()
     discovery = LanDiscoveryResponder(http_port=args.port)
     discovery.start()
 
-    server = QuietThreadingHTTPServer((args.host, args.port), make_handler(hub, args.port))
-
     lan_ip = get_lan_ip()
-    console_url = f"http://127.0.0.1:{args.port}/?preview=1"
     phone_url = f"http://{lan_ip}:{args.port}/"
 
     print("=" * 64)
@@ -841,9 +919,7 @@ def main() -> None:
     print("=" * 64)
 
     if args.open:
-        import webbrowser
-
-        threading.Timer(0.6, lambda: webbrowser.open(console_url)).start()
+        threading.Timer(0.6, lambda: _open_browser(console_url)).start()
 
     try:
         server.serve_forever()
