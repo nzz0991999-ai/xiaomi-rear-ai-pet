@@ -8,6 +8,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
@@ -72,6 +73,48 @@ public class RearPetActivity extends Activity {
                 }
             });
         }
+    }
+
+    /** Re-apply rotation correction after the user changes it in MainActivity. */
+    public static void refreshRotationIfRunning() {
+        RearPetActivity act = rearInstanceRef.get();
+        if (act != null && !act.isFinishing()) {
+            act.runOnUiThread(() -> act.applyPetRotation(act.webView));
+        }
+    }
+
+    /**
+     * Xiaomi 17 Pro Max rear display reports a coordinate system rotated 90deg relative to
+     * its physical orientation, so the pet appears tipped over. Rotate the WebView back and
+     * swap its layout width/height so the content still fills the panel edge-to-edge.
+     * Value stored in prefs: 90 / 270 / 0 (0 = no correction).
+     */
+    private void applyPetRotation(final WebView wv) {
+        if (wv == null || isFrontFullscreenMode()) return;
+        wv.post(() -> {
+            if (wv != webView || isFinishing()) return;
+            int deg = getSharedPreferences("mi_rear_pet", MODE_PRIVATE)
+                    .getInt("rear_rotation_deg", 0);
+            wv.setRotation(deg);
+            int w = rootLayout.getWidth();
+            int h = rootLayout.getHeight();
+            if (w <= 0 || h <= 0) {
+                DisplayMetrics dm = new DisplayMetrics();
+                getWindowManager().getDefaultDisplay().getRealMetrics(dm);
+                w = dm.widthPixels;
+                h = dm.heightPixels;
+            }
+            FrameLayout.LayoutParams lp;
+            if (deg == 90 || deg == 270) {
+                lp = new FrameLayout.LayoutParams(h, w, Gravity.CENTER);
+            } else {
+                lp = new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT);
+            }
+            wv.setLayoutParams(lp);
+            DiagLog.log("PetAct", "背屏方向修正 rotation=" + deg + "° webview=" + h + "x" + w);
+        });
     }
 
     @Override
@@ -226,6 +269,7 @@ public class RearPetActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
         ));
+        applyPetRotation(webView);
         statusOverlay.setVisibility(View.VISIBLE);
         statusOverlay.setText("正在加载 AI 桌宠...");
         webView.loadUrl(currentUrl);

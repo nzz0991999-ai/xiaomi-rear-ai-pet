@@ -27,6 +27,8 @@ import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.List;
 
 /**
@@ -42,6 +44,7 @@ public class MainActivity extends Activity implements ShizukuBridge.Listener, Di
     private SharedPreferences prefs;
     private EditText urlInput;
     private LinearLayout discoveredBox;
+    private TextView connStatusText;
     private TextView nextStepBanner;
     private TextView shizukuStatusText;
     private TextView shizukuGuideToggle;
@@ -52,6 +55,7 @@ public class MainActivity extends Activity implements ShizukuBridge.Listener, Di
     private Button updateBannerBtn;
     private Button shizukuActionBtn;
     private Button openShizukuBtn;
+    private Button rearRotateBtn;
     private Switch guardSwitch;
     private List<LanDiscovery.DiscoveredHost> lastHosts;
     private AppUpdater.UpdateInfo pendingUpdate;
@@ -123,6 +127,30 @@ public class MainActivity extends Activity implements ShizukuBridge.Listener, Di
     /**
      * Shows a single non-stacking Toast and ignores repeated identical prompts within 2 seconds.
      */
+    private void refreshRearRotateLabel() {
+        if (rearRotateBtn == null) return;
+        int deg = prefs.getInt("rear_rotation_deg", 0);
+        String state = deg == 90 ? "左转90°" : (deg == 270 ? "右转90°" : "不修正");
+        rearRotateBtn.setText("背屏方向修正：" + state + "（点击切换）");
+    }
+
+    /**
+     * 在界面固定位置显示电脑连接状态（替代系统 Toast）。
+     * 依据已保存的 url：有地址显示"已连接"，否则显示"未连接"。
+     */
+    private void updateConnStatus() {
+        if (connStatusText == null) return;
+        String saved = prefs.getString("url", "").trim();
+        if (saved.isEmpty()) {
+            connStatusText.setText("● 电脑：未连接（点下方「连接」或先搜索）");
+            connStatusText.setTextColor(Color.parseColor("#FFB36B"));
+        } else {
+            String shown = saved.length() > 62 ? saved.substring(0, 59) + "..." : saved;
+            connStatusText.setText("● 电脑：已连接 → " + shown);
+            connStatusText.setTextColor(Color.parseColor("#7CFFBE"));
+        }
+    }
+
     private void showToast(String msg) {
         if (msg == null || msg.trim().isEmpty()) return;
         long now = SystemClock.uptimeMillis();
@@ -279,12 +307,23 @@ public class MainActivity extends Activity implements ShizukuBridge.Listener, Di
         // Card 1: PC Connection (Wi-Fi Auto-Discovery)
         LinearLayout card1 = makeCard("1. 连接电脑");
 
+        // 固定位置的连接状态显示（不弹系统 Toast）。
+        connStatusText = new TextView(this);
+        connStatusText.setTextSize(13f);
+        connStatusText.setLineSpacing(dp(2), 1f);
+        LinearLayout.LayoutParams csLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        csLp.bottomMargin = dp(8);
+        connStatusText.setLayoutParams(csLp);
+        card1.addView(connStatusText);
+        updateConnStatus();
+
         discoveredBox = new LinearLayout(this);
         discoveredBox.setOrientation(LinearLayout.VERTICAL);
         card1.addView(discoveredBox);
 
         urlInput = new EditText(this);
-        urlInput.setHint("http://192.168.x.x:8765/");
+        urlInput.setHint("局域网 http://192.168.x.x:8765/ 或穿透 https://xxx.ts.net/");
         urlInput.setHintTextColor(Color.parseColor("#5B6E82"));
         urlInput.setTextColor(Color.WHITE);
         urlInput.setTextSize(13.5f);
@@ -299,12 +338,26 @@ public class MainActivity extends Activity implements ShizukuBridge.Listener, Di
         urlInput.setLayoutParams(urlLp);
         card1.addView(urlInput);
 
+        // 「重新搜索」只把发现的地址回填到输入框；「连接」按钮才真正连接。
+        LinearLayout scanRow = new LinearLayout(this);
+        scanRow.setOrientation(LinearLayout.HORIZONTAL);
+        scanRow.setGravity(Gravity.CENTER_VERTICAL);
+
         Button scanBtn = makeButton("重新搜索局域网电脑", Color.parseColor("#182436"), Color.parseColor("#92EDFF"), Color.parseColor("#2B4866"));
         scanBtn.setTextSize(13f);
-        scanBtn.setLayoutParams(new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        scanBtn.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         scanBtn.setOnClickListener(v -> startDiscovery());
-        card1.addView(scanBtn);
+        scanRow.addView(scanBtn);
+
+        Button connectBtn = makeButton("连接", Color.parseColor("#0D3B4C"), Color.parseColor("#7AF4FF"), Color.parseColor("#34E8FF"));
+        connectBtn.setTextSize(13f);
+        LinearLayout.LayoutParams connLp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        connLp.leftMargin = dp(8);
+        connectBtn.setLayoutParams(connLp);
+        connectBtn.setOnClickListener(v -> connectToEnteredUrl(v));
+        scanRow.addView(connectBtn);
+
+        card1.addView(scanRow);
         root.addView(card1);
 
         // Card 2: Xiaomi Rear Screen Projection (Clean & Minimal)
@@ -395,6 +448,25 @@ public class MainActivity extends Activity implements ShizukuBridge.Listener, Di
             ShizukuBridge.withdrawFromRearDisplay(this, (ok, detail) -> showToast(detail));
         });
         card2.addView(stopRearBtn);
+
+        // Rear-screen orientation correction (Xiaomi 17 Pro Max rear camera screen is rotated).
+        rearRotateBtn = makeButton("", Color.parseColor("#1B1526"), Color.parseColor("#D6B8FF"), Color.parseColor("#6E4FA0"));
+        rearRotateBtn.setTextSize(12.5f);
+        rearRotateBtn.setPadding(dp(12), dp(9), dp(12), dp(9));
+        LinearLayout.LayoutParams rrLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        rrLp.bottomMargin = dp(12);
+        rearRotateBtn.setLayoutParams(rrLp);
+        refreshRearRotateLabel();
+        rearRotateBtn.setOnClickListener(v -> {
+            int cur = prefs.getInt("rear_rotation_deg", 0);
+            int next = cur == 90 ? 270 : (cur == 270 ? 0 : 90);
+            prefs.edit().putInt("rear_rotation_deg", next).apply();
+            refreshRearRotateLabel();
+            RearPetActivity.refreshRotationIfRunning();
+            showToast("背屏方向：" + (next == 0 ? "不修正" : ("旋转 " + next + "°")) + "，已实时应用");
+        });
+        card2.addView(rearRotateBtn);
 
         // Auto-Guard toggle row (keep exact wording per user preference)
         LinearLayout guardRow = new LinearLayout(this);
@@ -712,6 +784,7 @@ public class MainActivity extends Activity implements ShizukuBridge.Listener, Di
     }
 
     private void refreshStatusUi() {
+        updateConnStatus();
         boolean installed = ShizukuBridge.isShizukuInstalled(this);
         boolean alive = ShizukuBridge.isBinderAlive();
         boolean granted = ShizukuBridge.isPermissionGranted();
@@ -764,6 +837,93 @@ public class MainActivity extends Activity implements ShizukuBridge.Listener, Di
         }
     }
 
+    /**
+     * 「连接」按钮：探测输入框里的地址（用户可改成 /pet 等代理地址）。
+     * 只走局域网 /api/info，不回退 GitHub；成功后才保存并生效，失败时保留原连接。
+     */
+    private void connectToEnteredUrl(View trigger) {
+        final String entered = urlInput.getText().toString().trim();
+        if (entered.isEmpty()) {
+            showToast("请先搜索局域网电脑，或输入穿透/局域网地址");
+            return;
+        }
+        final Button btn = (trigger instanceof Button) ? (Button) trigger : null;
+        if (btn != null) {
+            btn.setEnabled(false);
+            btn.setText("连接中…");
+        }
+        new Thread(() -> {
+            // 支持三种输入：带协议/不带协议、带 /pet 前缀/不带。
+            // ts.net 等穿透域名默认补 https；局域网 IP 补 http。
+            String s = entered;
+            if (!s.startsWith("http://") && !s.startsWith("https://")) {
+                s = (s.contains("ts.net") || s.contains("tailscale")) ? "https://" + s : "http://" + s;
+            }
+            while (s.endsWith("/")) s = s.substring(0, s.length() - 1);
+            final String base = s;
+
+            // 候选地址：原样，以及补 /pet 前缀（网关把桌宠挂在 /pet 下）。
+            String[] candidates = base.endsWith("/pet")
+                    ? new String[]{base}
+                    : new String[]{base, base + "/pet"};
+            String okBase = null;
+            String lastErr = "";
+            for (String cand : candidates) {
+                HttpURLConnection conn = null;
+                try {
+                    URL u = new URL(cand + "/api/info");
+                    conn = (HttpURLConnection) u.openConnection();
+                    conn.setRequestMethod("GET");
+                    conn.setConnectTimeout(3000);
+                    conn.setReadTimeout(3000);
+                    int code = conn.getResponseCode();
+                    if (code == 200) {
+                        String body = new String(readAll(conn.getInputStream()), java.nio.charset.StandardCharsets.UTF_8);
+                        if (body.contains("apk_version_name") || body.contains("lan_url")) {
+                            okBase = cand;
+                            break;
+                        }
+                        lastErr = "不是桌宠服务";
+                    } else {
+                        lastErr = "HTTP " + code;
+                    }
+                } catch (Throwable t) {
+                    lastErr = String.valueOf(t.getMessage());
+                } finally {
+                    if (conn != null) conn.disconnect();
+                }
+            }
+            final String finalBase = okBase;
+            final String error = lastErr;
+            runOnUiThread(() -> {
+                if (btn != null) {
+                    btn.setEnabled(true);
+                    btn.setText("连接");
+                }
+                if (finalBase == null) {
+                    showToast("连接失败：" + error);
+                    return;
+                }
+                // 把最终可用的地址（含 /pet）写回输入框再保存，确保 WebView/SSE 走同一入口。
+                urlInput.setText(finalBase + "/");
+                savePrefs();
+                DiagLog.setServerUrl(currentUrl());
+                renderDiscoveredHosts();
+                // 在卡片内固定位置显示连接状态，不再弹系统 Toast。
+                updateConnStatus();
+                checkForUpdate(false);
+            });
+        }, "connect-to-pc").start();
+    }
+
+    private static byte[] readAll(java.io.InputStream in) throws java.io.IOException {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[4096];
+        int n;
+        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+        return out.toByteArray();
+    }
+
     private void startDiscovery() {
         discoveredBox.removeAllViews();
         TextView scanning = new TextView(this);
@@ -774,12 +934,14 @@ public class MainActivity extends Activity implements ShizukuBridge.Listener, Di
 
         LanDiscovery.discoverAsync(hosts -> {
             lastHosts = hosts;
+            // 只回显地址到输入框，不连接、不保存；用户确认后可改地址，再点「连接」。
             if (hosts.size() == 1) {
                 urlInput.setText(hosts.get(0).url);
-                savePrefs();
-                checkForUpdate(false);
             }
             renderDiscoveredHosts();
+            if (!hosts.isEmpty()) {
+                showToast("已搜到 " + hosts.size() + " 台电脑，请点「连接」");
+            }
         });
     }
 
@@ -797,8 +959,8 @@ public class MainActivity extends Activity implements ShizukuBridge.Listener, Di
         for (LanDiscovery.DiscoveredHost h : lastHosts) {
             boolean selected = h.url.equals(activeUrl);
             String label = selected
-                    ? ("✓ 已连接：" + h.host + " (" + h.ip + ":" + h.port + ")")
-                    : ("发现电脑：" + h.host + " (" + h.ip + ":" + h.port + ")  · 点击选用");
+                    ? ("✓ 已填入：" + h.host + " (" + h.ip + ":" + h.port + ")  点「连接」生效")
+                    : ("发现电脑：" + h.host + " (" + h.ip + ":" + h.port + ")  · 点击填入地址");
             Button chip = makeButton(
                     label,
                     selected ? Color.parseColor("#0D2B20") : Color.parseColor("#0D2C38"),
@@ -812,10 +974,8 @@ public class MainActivity extends Activity implements ShizukuBridge.Listener, Di
             chip.setLayoutParams(lp);
             chip.setOnClickListener(v -> {
                 urlInput.setText(h.url);
-                savePrefs();
                 renderDiscoveredHosts();
-                checkForUpdate(false);
-                showToast("已连接：" + h.host);
+                showToast("已填入：" + h.host + "，请点「连接」");
             });
             discoveredBox.addView(chip);
         }
